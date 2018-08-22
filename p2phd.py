@@ -95,36 +95,45 @@ class MnistWganInv(object):
             self.label= self.scdobj_real.end_points["pool5"]
             self.label_resized = tf.image.resize_bilinear(self.label, (150,496))
             self.images_fake = self.global_generate(self.label_resized)
-            self.images_fake_float = tf.clip_by_value((self.images_fake+1.)/2*255.,0,255)
+            self.images_fake_float = tf.clip_by_value((self.images_fake+1.)/2.*255.,0,255)
             self.scdobj_fake = scd.SCD(input=self.images_fake_float, reuse=True)
-            #self.images_fake_uint8 = tf.cast(self.images_fake_float,tf.uint8)
+            self.images_fake_uint8 = tf.cast(self.images_fake_float,tf.uint8)
             self.images_real = (self.images/255.-0.5)/0.5
 
             print(self.images_real, self.images_fake)
-            self.pred_real = self.multi_discriminate(self.images_real,reuse=tf.AUTO_REUSE)
-            self.pred_fake = self.multi_discriminate(self.images_fake,reuse=tf.AUTO_REUSE)
+            concat_real = tf.concat([self.images_real,self.label_resized], axis=3)
+            concat_fake = tf.concat([self.images_fake,self.label_resized], axis=3)
+            self.pred_real = self.multi_discriminate(concat_real)
+            self.pred_fake = self.multi_discriminate(concat_fake,reuse=True)
+            #self.pred_real = self.multi_discriminate(self.images_real, reuse=tf.AUTO_REUSE)
+            #self.pred_fake = self.multi_discriminate(self.images_fake, reuse=tf.AUTO_REUSE)
 
             #define losses
             #disc losses
             self.dis_cost = 0
             for i in range(self.num_D):
-                self.dis_cost = (mseloss(self.pred_real[i][-1],tf.ones_like(self.pred_real[i][-1]))*0.5 + mseloss(self.pred_fake[i][-1],tf.zeros_like(self.pred_fake[i][-1])))
+                self.dis_cost += (mseloss(self.pred_real[i][-1],tf.ones_like(self.pred_real[i][-1]))*0.5 + mseloss(self.pred_fake[i][-1],tf.zeros_like(self.pred_fake[i][-1])))
 
             #gen losses
-            self.gen_cost = 0
+            self.gen_only_cost = 0
             for i in range(self.num_D):
-                self.gen_cost  =  mseloss(self.pred_fake[i][-1], tf.ones_like(self.pred_fake[i][-1]))
+                self.gen_only_cost  +=  mseloss(self.pred_fake[i][-1], tf.ones_like(self.pred_fake[i][-1]))
+
+            self.gan_feat_cost = 0
             feat_weights = 4.0 / (self.n_layers + 1)
             D_weights = 1.0 / self.num_D
             for i in range(self.num_D):
                 for j in range(len(self.pred_fake[i])-1):
-                    self.gen_cost += D_weights * feat_weights * \
+                    self.gan_feat_cost += D_weights * feat_weights * \
                         l1loss(self.pred_fake[i][j], self.pred_real[i][j]) * self.lambda_feat
-            weights=[1.6, 2.3, 1.8, 2.8, 10/0.8]
+
+            self.vgg_feat_cost = 0
+            weights=[1./1.6, 1./2.3, 1./1.8, 1./2.8, 10/0.8]
             for i in range(5):
-                self.gen_cost += weights[i] * l1loss(self.scdobj_real.end_points["conv%d_2"%(i+1)], self.scdobj_fake.end_points["conv%d_2"%(i+1)])        
+                self.vgg_feat_cost += weights[i] * l1loss(self.scdobj_real.end_points["conv%d_2"%(i+1)], self.scdobj_fake.end_points["conv%d_2"%(i+1)]) * 0.1#self.lambda_feat
                    
-            # VGG feature matching loss
+
+            self.gen_cost = self.gen_only_cost + self.gan_feat_cost + self.vgg_feat_cost
 
 
 
@@ -140,13 +149,12 @@ class MnistWganInv(object):
             self.gen_params=[v for v in train_vars if v.name.split("/")[1] == "global_generate"]
             self.dis_params=[v for v in train_vars if v.name.split("/")[1] == "multi_discriminate"]
 
-            with tf.variable_scope('pix2pixhd',reuse=tf.AUTO_REUSE):
-                genopt = tf.train.AdamOptimizer(
-                    learning_rate=2e-4, beta1=0.5, beta2=0.999)
-                self.gen_train_op= slim.learning.create_train_op(self.gen_cost,genopt,summarize_gradients=True,variables_to_train=self.gen_params)
-                disopt = tf.train.AdamOptimizer(
-                    learning_rate=2e-4, beta1=0.5, beta2=0.999)
-                self.dis_train_op= slim.learning.create_train_op(self.dis_cost,disopt,summarize_gradients=True,variables_to_train=self.dis_params)
+            genopt = tf.train.AdamOptimizer(
+                learning_rate=2e-4, beta1=0.5, beta2=0.999)
+            self.gen_train_op= slim.learning.create_train_op(self.gen_cost,genopt,summarize_gradients=True,variables_to_train=self.gen_params)
+            disopt = tf.train.AdamOptimizer(
+                learning_rate=2e-4, beta1=0.5, beta2=0.999)
+            self.dis_train_op= slim.learning.create_train_op(self.dis_cost,disopt,summarize_gradients=True,variables_to_train=self.dis_params)
 
     def Discriminator_Regularizer(self,D1_logits, D1_arg, D2_logits, D2_arg):
         with tf.variable_scope('disc_reg'):
@@ -181,22 +189,22 @@ class MnistWganInv(object):
 
                 net = pad(X, 1)
                 net = slim.conv2d(net, dim, kernel_size=(3,3), padding="VALID") 
-                net = norm_layer(net)
+                net = norm_layer(net, trainable=True)
                 net = activation(net)
                 net = pad(X, 1)
                 net = slim.conv2d(net, dim, kernel_size=(3,3), padding="VALID") 
-                net = norm_layer(net)
+                net = norm_layer(net, trainable=True)
 
                 return net + X
 
-    def global_generate(self, label, norm_layer=tf.contrib.layers.instance_norm, activation=tf.nn.relu, reuse=None):
+    def global_generate(self, label, norm_layer=tf.contrib.layers.instance_norm, activation=tf.nn.relu, reuse=False):
         with tf.variable_scope('pix2pixhd/global_generate', reuse=reuse):
             n_downsampling=4
 
             net = pad(label, 3)
             net = slim.conv2d(net, self.ngf, kernel_size=(7,7), padding="VALID") 
             print("1 reflect conv", net)
-            net = norm_layer(net)
+            net = norm_layer(net, trainable=True)
             net = activation(net)
 
             for i in range(n_downsampling):
@@ -204,7 +212,7 @@ class MnistWganInv(object):
                 net = pad(net, 1, mode="CONSTANT")
                 net = slim.conv2d(net, self.ngf*mult*2, kernel_size=(3,3), stride=(2,2), padding="VALID") 
                 print("%d conv roop"%i, net)
-                net = norm_layer(net)
+                net = norm_layer(net, trainable=True)
                 net = activation(net)
 
             mult = 2**n_downsampling
@@ -220,6 +228,7 @@ class MnistWganInv(object):
                 if i == 0 or i == 2:
                     net = net[:,1:,:,:]
                 #net = pad(net, (0,0) if i == 1 or i == 3 else (0,0), mode="CONSTANT")
+                net = norm_layer(net, trainable=True)
                 print("%d transconv pad roop"%i, net)
                 net = activation(net)
 
@@ -230,7 +239,7 @@ class MnistWganInv(object):
 
             return net
 
-    def multi_discriminate(self, X, norm_layer=tf.contrib.layers.instance_norm, activation=tf.nn.relu, reuse=None):
+    def multi_discriminate(self, X, norm_layer=tf.contrib.layers.instance_norm, activation=tf.nn.relu, reuse=False):
         #with tf.variable_scope('multi_discriminate', reuse=reuse):
         with tf.variable_scope('pix2pixhd/multi_discriminate',reuse=reuse):
             res=[]
@@ -245,14 +254,14 @@ class MnistWganInv(object):
 
 
 
-    def nlayer_discriminate(self,X,name="nlayer_discriminate", norm_layer=tf.contrib.layers.instance_norm, reuse=False):
+    def nlayer_discriminate(self,net,name="nlayer_discriminate", norm_layer=tf.contrib.layers.instance_norm, reuse=False):
         #with tf.variable_scope(name):
         #with tf.variable_scope(tf.get_variable_scope()):
         with tf.variable_scope(name, reuse=reuse):
             res=[]
             kw = 4
             padw = int(np.ceil((kw-1.0)/2))
-            net = pad(X, padw, mode="CONSTANT")
+            #net = pad(X, padw, mode="CONSTANT")
             net = slim.conv2d(net, self.ndf, kernel_size=(kw,kw), stride=(2,2), padding="VALID")
             net=tf.nn.leaky_relu(net)
             res.append(net)
@@ -260,19 +269,19 @@ class MnistWganInv(object):
             for n in range(1, self.n_layers):
                 nf_prev = nf
                 nf = min(nf * 2, 512)
-                net = pad(X, padw, mode="CONSTANT")
+                #net = pad(X, padw, mode="CONSTANT")
                 net=slim.conv2d(net, nf,kernel_size=(kw,kw), stride=(2,2), padding="VALID")
-                net = norm_layer(net)
+                net = norm_layer(net, trainable=True)
                 net = tf.nn.leaky_relu(net)
                 res.append(net)
             nf_prev = nf
             nf = min(nf * 2, 512)
-            net = pad(X, padw, mode="CONSTANT")
+            #net = pad(X, padw, mode="CONSTANT")
             net=slim.conv2d(net, nf,kernel_size=(kw,kw), padding="VALID")
-            net = norm_layer(net)
+            net = norm_layer(net, trainable=True)
             net = tf.nn.leaky_relu(net)
             res.append(net)
-            net = pad(X, padw, mode="CONSTANT")
+            #net = pad(X, padw, mode="CONSTANT")
             net=slim.conv2d(net, 1,kernel_size=(kw,kw), padding="VALID")
             res.append(net)
             return res
@@ -285,9 +294,9 @@ class MnistWganInv(object):
                                     feed_dict={self.x: x, self.z: z})
             return _gen_cost, summary
         else:
-            _gen_cost, _ = sess.run([self.gen_cost, self.gen_train_op],
+            _gen_cost, go, gf, vf, _ = sess.run([self.gen_cost, self.gen_only_cost, self.gan_feat_cost, self.vgg_feat_cost, self.gen_train_op],
                                     feed_dict={self.images: x})
-            return _gen_cost 
+            return _gen_cost, go, gf, vf 
 
     def train_dis(self, sess, x, gamma, summary=False):
         if summary:
@@ -303,10 +312,10 @@ class MnistWganInv(object):
 
     def reconstruct_images(self, sess, images, frame):
         for i in range(8):
-            reconstructions = sess.run(self.images_fake_float, feed_dict={self.images: np.expand_dims(images[i],0)})
-            reconstructions = np.uint8(reconstructions)
-            samplesnpz = reconstructions.reshape((-1, self.h,self.w,self.c))
-            skimage.io.imsave(os.path.join(self.args.exdir,"%d_%d.jpg"%(i,frame)),samplesnpz[0])
+            reconstructions,oris = sess.run([self.images_fake_uint8, self.images], feed_dict={self.images: np.expand_dims(images[i],0)})
+            #Jsamplesnpz = reconstructions.reshape((-1, self.h,self.w,self.c))
+            skimage.io.imsave(os.path.join(self.args.exdir,"%d_%d.jpg"%(frame,i)),reconstructions[0])
+            skimage.io.imsave(os.path.join(self.args.exdir,"%d_%d_ori.jpg"%(frame,i)),np.uint8(oris[0]))
         """
         comparison = np.zeros((images.shape[0] * 2, images.shape[1],images.shape[2],images.shape[3]),
                               dtype=np.float32)
@@ -368,7 +377,7 @@ if __name__ == '__main__':
 
 
     fixed_images = np.zeros([8,args.input_c,args.input_w,args.input_h])
-    for i in range(args.batch_size):
+    for i in range(8):
         fixed_images[i,:,:,:]=cv2.resize(scd.imread_as_jpg(os.path.join(args.dataset_test_path,"%06d.png"%(i+7481))),(496,150))
     
     mnistWganInv = MnistWganInv(
@@ -376,7 +385,9 @@ if __name__ == '__main__':
         nf=256, batch_size=args.batch_size, c_gp_x=args.c_gp_x, lamda=args.lamda,
         output_path=args.output_path,args=args)
 
-    saver = tf.train.Saver(max_to_keep=10)
+    train_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.contrib.framework.get_name_scope())
+    p2phd_var_list=[v for v in train_vars if v.name.split("/")[0] == "pix2pixhd"]
+    saver = tf.train.Saver(max_to_keep=10, var_list=p2phd_var_list)
 
 
     config = tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))
@@ -396,11 +407,13 @@ if __name__ == '__main__':
         npzs = {}
         batchmx = np.zeros([args.batch_size,args.input_c,args.input_w,args.input_h])
         print("pre epoch")
+        """
         with tf.name_scope("summary"):
             tf.summary.scalar("gen_cost",mnistWganInv.gen_cost)
             tf.summary.scalar("dis_cost",mnistWganInv.dis_cost)
             mnistWganInv.merge = tf.summary.merge_all()
             writer = tf.summary.FileWriter(args.logdir,session.graph)
+        """
 
         summary=False
         for epoch in range(args.epoch):
@@ -419,7 +432,6 @@ if __name__ == '__main__':
                         gamma = args.gamma
 
                     for i in range(args.dis_iter):
-                        noise = np.random.randn(args.batch_size, args.z_dim)
                         batch_files,_ = minibatch.__next__()
                         for idx, filepath in enumerate(batch_files):
                             if not filepath in npzs:
@@ -428,19 +440,20 @@ if __name__ == '__main__':
                             batchmx[idx,:,:,:]=npzs[filepath]
                         images = batchmx
 
+
+                    if summary:
+                        gen_cost, mg = mnistWganInv.train_gen(session, images, noise, summary=True)
+                    else:
+                        gen_cost, go, gf, vf = mnistWganInv.train_gen(session, images, summary=False)
+
                     if summary:
                         cd, md = mnistWganInv.train_dis(session, images, noise, gamma, summary=True)
                     else:
                         cd = mnistWganInv.train_dis(session, images, gamma, summary=False)
                     dis_cost = cd
 
-                    if summary:
-                        gen_cost, mg = mnistWganInv.train_gen(session, images, noise, summary=True)
-                    else:
-                        gen_cost = mnistWganInv.train_gen(session, images, summary=False)
-
                     stime=time.time()-pretime        
-                    print("epoch: %d, iteration: %d, gen_cost: %f, dis_cost: %f, time: %.2f"%(epoch, iteration, gen_cost, dis_cost, stime))
+                    print("epoch: %d, iteration: %d, gen_cost: %f, go: %f, gf: %f, vf: %f, dis_cost: %f, time: %.2f"%(epoch, iteration, gen_cost, go, gf, vf, dis_cost, stime))
 
                     tflib.plot.plot('train gen cost', gen_cost)
                     tflib.plot.plot('train dis cost', dis_cost)

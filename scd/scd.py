@@ -113,7 +113,7 @@ def get_tenors(input=None, reuse=None,bbox=False):
             tf.get_variable_scope().reuse_variables()
         """
         #predictions, localisations, logits, end_points = ssd.net(image_4d, is_training=False, reuse=reuse)
-        predictions, localisations, logits, end_points = ssd.net(image_4d, is_training=False)
+        predictions, localisations, logits, end_points = ssd.net(image_4d, is_training=False, reuse=reuse)
 
     end_points={}
     end_points["input"] = image_4d
@@ -340,8 +340,6 @@ def get_saver():
 
 class SCD(object):
     def __init__(self, input=None,reuse=None):
-        if reuse:
-            tf.get_variable_scope().reuse_variables()
         if input==None:
             self.input=tf.placeholder(tf.float32,[None,None,None,3])
         else:
