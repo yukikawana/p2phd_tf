@@ -1,0 +1,13 @@
+*.mat
+*.meta
+*.index
+*.data-00000-of-00001
+*.log
+*.csv
+*.pkl
+*.npz
+*.bmp
+*.png
+*.jpg
+*.gz
+*ckpt*
