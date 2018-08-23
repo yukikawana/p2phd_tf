@@ -25,6 +25,8 @@ import tflib.ops.batchnorm
 import tflib.ops.conv2d
 import tflib.ops.deconv2d
 import tflib.ops.linear
+import pxhdgan
+import fmgan
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.layers import Input, Conv2D, GlobalAveragePooling2D, Dropout
 from tensorflow.python.keras.layers import Activation, BatchNormalization, add, Reshape
@@ -50,19 +52,13 @@ def l1loss(x,y):
 def mseloss(x,y):
     return tf.reduce_mean(tf.square(x-y))
 
-def get_saver():
-    train_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.contrib.framework.get_name_scope())
-    ssd_var_list=[v for v in train_vars if v.name.split("/")[0].startswith("pix2pixhd")]
-    saver = tf.train.Saver(var_list=ssd_var_list)
-    return saver
-
 NORMALIZE_CONST=201.
 TRANSPOSE=False
 act_fn_switch=tf.nn.leaky_relu
 initializer = tf.random_normal_initializer(stddev=0.02)
 initializer2 = tf.random_normal_initializer(mean=0.,stddev=0.02)
 
-class pxhdgan(object):
+class pxhdfmgan(object):
     def __init__(self, x_dim=784, w=31, h=10, c=512, z_dim=64, latent_dim=64,nf=64,  batch_size=80,
                  c_gp_x=10., lamda=0.1, output_path='./',training=True,args=None):
         self.num_D = 2
