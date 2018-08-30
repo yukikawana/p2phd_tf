@@ -25,7 +25,7 @@ import tflib.ops.batchnorm
 import tflib.ops.conv2d
 import tflib.ops.deconv2d
 import tflib.ops.linear
-import pxhdgan
+import p2phd
 import fmgan
 from tensorflow.python.keras.models import Model
 from tensorflow.python.keras.layers import Input, Conv2D, GlobalAveragePooling2D, Dropout
@@ -33,6 +33,10 @@ from tensorflow.python.keras.layers import Activation, BatchNormalization, add, 
 from tensorflow.python.keras.layers import DepthwiseConv2D
 slim = tf.contrib.slim
 from tensorflow.python.keras import backend as K
+
+#mean_vec=np.load("/workspace/natural-adversary/image/mean.npz")["arr_0"]
+mean_vec=np.load("mean.npz")["arr_0"]
+
 def relu6(x):
     return tf.keras.backend.relu(x, maxval=6)
 def pad(x, p, mode="REFLECT"):
@@ -59,25 +63,24 @@ initializer = tf.random_normal_initializer(stddev=0.02)
 initializer2 = tf.random_normal_initializer(mean=0.,stddev=0.02)
 
 class pxhdfmgan(object):
-    def __init__(self, x_dim=784, w=31, h=10, c=512, z_dim=64, latent_dim=64,nf=64,  batch_size=80,
-                 c_gp_x=10., lamda=0.1, output_path='./',training=True,args=None):
+    def __init__(self, fw=31, fh=10, fc=512, iw=496, ih=150, ic=3, z_dim=64, nf=64,  batch_size=80,
+                 output_path='./',args=None):
         self.num_D = 2
         self.n_layers=3
         self.lambda_feat=10.
         self.n_blocks = 9
         self.ngf=64
         self.ndf=64
-        self.x_dim = x_dim
         self.z_dim = z_dim
-        self.w = w
-        self.h = h
-        self.c =c
+        self.iw = iw
+        self.ih = ih
+        self.ic = ic
+        self.fw = fw
+        self.fh = fh
+        self.fc = fc
+
         self.nf = nf
-        self.restime = 3
-        self.latent_dim = latent_dim
         self.batch_size = batch_size
-        self.c_gp_x = c_gp_x
-        self.lamda = lamda
         self.output_path = output_path
         self.args=args
 
@@ -85,34 +88,80 @@ class pxhdfmgan(object):
 
      
         self.gamma_plh = tf.placeholder(tf.float32, shape=(), name='gammaplh')
-        self.images = tf.placeholder(tf.float32, shape=[None, 150, 496,self.c])
+        self.images= tf.placeholder(tf.float32, shape=[None, self.ih, self.iw, self.ic])
+        self.z_noise = tf.placeholder(tf.float32, shape=[None, self.z_dim])
+        #self.z_noise = tf.placeholder(tf.float32, shape=[self.batch_size, self.z_dim])
 
-        self.scdobj_real = scd.SCD(input=self.images)
-        self.label= self.scdobj_real.end_points["pool5"]
-        self.label_resized = tf.image.resize_bilinear(self.label, (150,496))
-        self.images_fake = self.global_generate(self.label_resized)
-        self.images_fake_float = tf.clip_by_value((self.images_fake+1.)/2.*255.,0,255)
-        self.scdobj_fake = scd.SCD(input=self.images_fake_float, reuse=True)
-        self.images_fake_uint8 = tf.cast(self.images_fake_float,tf.uint8)
+    def build_model(self):
+
         self.images_real = (self.images/255.-0.5)/0.5
+        self.scd_real = scd.SCD(input=self.images)
+        self.feature_real = tf.image.resize_nearest_neighbor(self.scd_real.end_points["pool5"],(self.ih, self.iw))
 
-        concat_real = tf.concat([self.images_real,self.label_resized], axis=3)
-        concat_fake = tf.concat([self.images_fake,self.label_resized], axis=3)
-        self.pred_real = self.multi_discriminate(concat_real)
-        self.pred_fake = self.multi_discriminate(concat_fake,reuse=True)
-        #self.pred_real = self.multi_discriminate(self.images_real, reuse=tf.AUTO_REUSE)
-        #self.pred_fake = self.multi_discriminate(self.images_fake, reuse=tf.AUTO_REUSE)
+        self.fmgan_real = fmgan.fmgan(
+                            x_dim=784, z_dim=args.z_dim, w=self.fw, h=self.fh, c=self.fc, latent_dim=args.latent_dim,
+                            nf=256, batch_size=args.batch_size, c_gp_x=args.c_gp_x, lamda=args.lamda,
+                            output_path=args.output_path,args=args)
+
+        self.pxhdgan = p2phd.pxhdgan(
+                            x_dim=784, z_dim=args.z_dim, w=self.iw, h=self.ih, c=self.ic, latent_dim=args.latent_dim,
+                            nf=256, batch_size=args.batch_size, c_gp_x=args.c_gp_x, lamda=args.lamda,
+                            output_path=args.output_path,args=args)
+
+        self.z_rec = self.fmgan_real.invert(self.feature_real)
+        self.feature_rec = self.fmgan_real.generate(self.z_rec)
+        self.images_rec = self.pxhdgan.global_generate(self.feature_rec)
+        self.images_out = tf.clip_by_value((self.images_rec+1.)/2.*255.,0,255)
+
+        self.feature_fake_noise = tf.image.resize_nearest_neighbor(self.fmgan_real.generate(self.z_noise, reuse=True),(self.ih, self.iw))
+        self.images_fake_noise = self.pxhdgan.global_generate(self.feature_fake_noise, reuse=True)
+        self.images_fake_noise_out = tf.clip_by_value((self.images_fake_noise+1.)/2.*255.,0,255)
+        self.scd_fake_noise = scd.SCD(input=self.images_fake_noise_out,reuse=True)
+
+        self.feature_fake = tf.image.resize_nearest_neighbor(self.scd_fake_noise.end_points["pool5"], (self.ih, self.iw))
+        self.z_rec_fake = self.fmgan_real.invert(self.feature_fake, reuse=True)
+        self.feature_rec_fake = tf.image.resize_nearest_neighbor(self.fmgan_real.generate(self.z_rec_fake, reuse=True), (self.ih, self.iw))
+        self.images_rec_fake = self.pxhdgan.global_generate(self.feature_rec_fake, reuse=True)
+        self.images_rec_fake_out = tf.clip_by_value((self.images_rec_fake+1.)/2.*255.,0,255)
+        self.scd_rec_fake = scd.SCD(input=self.images_rec_fake_out, reuse=True)
+
+        self.images_fake = self.pxhdgan.global_generate(self.feature_real, reuse=True)
+        self.images_fake_out = tf.clip_by_value((self.images_fake+1.)/2.*255.,0,255)
+        self.scd_fake = scd.SCD(input=self.images_fake_out, reuse=True)
+        self.images_fake_uint8 = tf.cast(self.images_fake_out,tf.uint8)
+
+        #self.images_fake_uint8 = tf.cast(self.images_fake_float,tf.uint8)
+
+        concat_images_fake_noise = tf.concat([self.images_fake_noise, self.feature_fake_noise], axis=3)
+        concat_images_rec_fake = tf.concat([self.images_rec_fake, self.feature_fake_noise], axis=3)
+        concat_images_fake = tf.concat([self.images_fake, self.feature_real], axis=3)
+        concat_images_real = tf.concat([self.images_real, self.feature_real], axis=3)
+
+        self.pred_fake_noise = self.pxhdgan.multi_discriminate(concat_images_fake_noise)
+        self.pred_fake = self.pxhdgan.multi_discriminate(concat_images_fake, reuse=True)
+        self.pred_rec_fake = self.pxhdgan.multi_discriminate(concat_images_rec_fake, reuse=True)
+        self.pred_real = self.pxhdgan.multi_discriminate(concat_images_real, reuse=True)
 
         #define losses
         #disc losses
-        self.dis_cost = 0
-        for i in range(self.num_D):
-            self.dis_cost += (mseloss(self.pred_real[i][-1],tf.ones_like(self.pred_real[i][-1]))*0.5 + mseloss(self.pred_fake[i][-1],tf.zeros_like(self.pred_fake[i][-1])))
+        def dc(preds,oz):
+            assert(oz == 1 or oz == 0)
+            loss = 0
+            tfoz = tf.ones_like if oz == 1 else tf.zeros_like
+            for p in preds:
+                pred = p[-1]
+                loss += mseloss(pred, tfoz(pred))
+            return loss
+
+        self.dis_cost = dc(self.pred_fake_noise, 0) + \
+                        dc(self.pred_fake, 0) + \
+                        dc(self.pred_rec_fake, 0) + \
+                        dc(self.pred_real, 1) * 0.5
 
         #gen losses
-        self.gen_only_cost = 0
-        for i in range(self.num_D):
-            self.gen_only_cost  +=  mseloss(self.pred_fake[i][-1], tf.ones_like(self.pred_fake[i][-1]))
+        self.gen_only_cost = dc(self.pred_fake_noise, 1) + \
+                            dc(self.pred_fake, 1) + \
+                            dc(self.pred_rec_fake, 1)
 
         self.gan_feat_cost = 0
         feat_weights = 4.0 / (self.n_layers + 1)
@@ -120,16 +169,19 @@ class pxhdfmgan(object):
         for i in range(self.num_D):
             for j in range(len(self.pred_fake[i])-1):
                 self.gan_feat_cost += D_weights * feat_weights * \
-                    l1loss(self.pred_fake[i][j], self.pred_real[i][j]) * self.lambda_feat
+                    (l1loss(self.pred_fake[i][j], self.pred_real[i][j]) + \
+                    l1loss(self.pred_fake_noise[i][j], self.pred_rec_fake[i][j]))# * self.lambda_feat
 
         self.vgg_feat_cost = 0
         #weights=[1./1.6, 1./2.3, 1./1.8, 1./2.8, 10/0.8]
         weights = [1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0]        
-        for i in range(5):
-            self.vgg_feat_cost += weights[i] * l1loss(self.scdobj_real.end_points["conv%d_1"%(i+1)], self.scdobj_fake.end_points["conv%d_1"%(i+1)]) * 1.#self.lambda_feat
+        for i in range(len(weights)):
+            self.vgg_feat_cost += weights[i] * \
+            (l1loss(self.scd_real.end_points["conv%d_1"%(i+1)], self.scd_fake.end_points["conv%d_1"%(i+1)]) +
+            l1loss(self.scd_fake_noise.end_points["conv%d_1"%(i+1)], self.scd_rec_fake.end_points["conv%d_1"%(i+1)]))
                
 
-        self.gen_cost = self.gen_only_cost + self.gan_feat_cost + self.vgg_feat_cost
+        self.gen_cost = self.gen_only_cost + self.gan_feat_cost + self.vgg_feat_cost + l1loss(self.z_noise, self.z_rec_fake)*0.1
 
 
 
@@ -147,10 +199,10 @@ class pxhdfmgan(object):
 
         with tf.variable_scope('pix2pixhd'):
             genopt = tf.train.AdamOptimizer(
-                learning_rate=2e-4, beta1=0.5, beta2=0.999)
+                learning_rate=2e-6, beta1=0.5, beta2=0.999)
             self.gen_train_op= slim.learning.create_train_op(self.gen_cost,genopt,summarize_gradients=True,variables_to_train=self.gen_params)
             disopt = tf.train.AdamOptimizer(
-                learning_rate=2e-4, beta1=0.5, beta2=0.999)
+                learning_rate=2e-6, beta1=0.5, beta2=0.999)
             self.dis_train_op= slim.learning.create_train_op(self.dis_cost,disopt,summarize_gradients=True,variables_to_train=self.dis_params)
 
     def Discriminator_Regularizer(self,D1_logits, D1_arg, D2_logits, D2_arg):
@@ -285,32 +337,33 @@ class pxhdfmgan(object):
 
 
 
-    def train_gen(self, sess, x, summary=False):
+    def train_gen(self, sess, x, noise, summary=False):
         if summary:
             _gen_cost, _, summary = sess.run([self.gen_cost, self.gen_train_op, self.merge],
                                     feed_dict={self.x: x, self.z: z})
             return _gen_cost, summary
         else:
             _gen_cost, go, gf, vf, _ = sess.run([self.gen_cost, self.gen_only_cost, self.gan_feat_cost, self.vgg_feat_cost, self.gen_train_op],
-                                    feed_dict={self.images: x})
+                                    feed_dict={self.images: x, self.z_noise:noise})
             return _gen_cost, go, gf, vf
 
-    def train_dis(self, sess, x, gamma, summary=False):
+    def train_dis(self, sess, x, noise, gamma, summary=False):
         if summary:
             print(gamma)
             _dis_cost, _, summary = sess.run([self.dis_cost, self.dis_train_op, self.merge],
-                  feed_dict={self.real_image: x, self.gamma_plh: gamma})
+                  feed_dict={self.real_image: x, self.gamma_plh: gamma, self.z_noise: noise})
             return _dis_cost, summary
         else:
             _dis_cost, _= sess.run([self.dis_cost, self.dis_train_op],
-                                    feed_dict={self.images: x, self.gamma_plh: gamma})
+                                    feed_dict={self.images: x, self.gamma_plh: gamma, self.z_noise:noise})
             return _dis_cost
 
 
     def reconstruct_images(self, sess, images, frame):
+        os.makedirs(os.path.join(self.args.exdir,str(frame)))
         for i in range(8):
             reconstructions,oris = sess.run([self.images_fake_uint8, self.images], feed_dict={self.images: np.expand_dims(images[i],0)})
-            skimage.io.imsave(os.path.join(self.args.exdir,"%d_%d.jpg"%(frame,i)),reconstructions[0])
+            skimage.io.imsave(os.path.join(self.args.exdir,str(frame),"%d.jpg"%i),reconstructions[0])
             #skimage.io.imsave(os.path.join(self.args.exdir,"%d_%d_ori.jpg"%(frame,i)),np.uint8(oris[0]))
         """
         comparison = np.zeros((images.shape[0] * 2, images.shape[1],images.shape[2],images.shape[3]),
@@ -354,32 +407,42 @@ if __name__ == '__main__':
                         help='dataset path')
     parser.add_argument('--nf', type=int, default=128,
                         help='ooooooooooo')
-    parser.add_argument('--input_c', type=int, default=150,
+    parser.add_argument('--ic', type=int, default=3,
     #parser.add_argument('--input_c', type=int, default=512,
                         help='ooooooooooo')
-    parser.add_argument('--input_w', type=int, default=496,
+    parser.add_argument('--iw', type=int, default=496,
     #parser.add_argument('--input_w', type=int, default=31,
                         help='ooooooooooo')
-    parser.add_argument('--input_h', type=int, default=3,
-    #parser.add_argument('--input_h', type=int, default=10,
+    parser.add_argument('--ih', type=int, default=150,
+    #parser.add_argument('--uuukk', type=int, default=10,
+                        help='ooooooooooo')
+    parser.add_argument('--fc', type=int, default=512,
+    #parser.add_argument('--input_c', type=int, default=512,
+                        help='ooooooooooo')
+    parser.add_argument('--fw', type=int, default=31,
+    #parser.add_argument('--input_w', type=int, default=31,
+                        help='ooooooooooo')
+    parser.add_argument('--fh', type=int, default=10,
                         help='ooooooooooo')
     parser.add_argument("--gamma",type=float,default=0.1,help="noise variance for regularizer [0.1]")
     parser.add_argument("--annealing", type=bool,default=False, help="annealing gamma_0 to decay_factor*gamma_0 [False]")
     parser.add_argument("--decay_factor",type=float, default=0.01, help="exponential annealing decay rate [0.01]")
     parser.add_argument("--doubleres",type=bool, default=False, help="exponential annealing decay rate [0.01]")
-    parser.add_argument('--exdir', type=str, default='examples')
-    parser.add_argument('--mddir', type=str, default='models')
+    parser.add_argument('--exdir', type=str, default='examples_unified')
+    parser.add_argument('--mddir', type=str, default='models_unified')
     args = parser.parse_args()
 
 
-    fixed_images = np.zeros([8,args.input_c,args.input_w,args.input_h])
+    fixed_images = np.zeros([8,args.ih,args.iw,args.ic])
     for i in range(8):
-        fixed_images[i,:,:,:]=cv2.resize(scd.imread_as_jpg(os.path.join(args.dataset_test_path,"%06d.png"%(i+7481))),(496,150))
+        fixed_images[i,:,:,:]=cv2.resize(scd.imread_as_jpg(os.path.join(args.dataset_test_path,"%06d.png"%(i+7481))),(args.iw,args.ih))
+    fixed_noise = np.random.randn(args.batch_size, args.z_dim)
     
-    mnistWganInv = pxhdgan(
-        x_dim=784, z_dim=args.z_dim, w=args.input_w, h=args.input_c, c=args.input_h, latent_dim=args.latent_dim,
-        nf=256, batch_size=args.batch_size, c_gp_x=args.c_gp_x, lamda=args.lamda,
+    mnistWganInv = pxhdfmgan(
+        z_dim=args.z_dim, iw=args.iw, ih=args.ih, ic=args.ic, 
+        nf=256, batch_size=args.batch_size, 
         output_path=args.output_path,args=args)
+    mnistWganInv.build_model()
 
     train_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.contrib.framework.get_name_scope())
     p2phd_var_list=[v for v in train_vars if v.name.split("/")[0] == "pix2pixhd"]
@@ -389,10 +452,17 @@ if __name__ == '__main__':
     config = tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))
     with tf.Session(config=config) as session:
         session.run(tf.global_variables_initializer())
+        """
         train_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.contrib.framework.get_name_scope())
         ssd_var_list=[v for v in train_vars if v.name.split("/")[0] == "ssd_300_vgg"]
         scd_saver = tf.train.Saver(var_list=ssd_var_list)
+        """
+        scd_saver = scd.get_saver()
         scd_saver.restore(session,"/workspace/imgsynth/ssd_300_kitti/ssd_model.ckpt")
+        fmgan_saver = fmgan.get_saver()
+        fmgan_saver.restore(session,"/workspace/natural-adversary/image/models_doubleres_constr_x_rzx/model-80999")
+        p2phd_saver = p2phd.get_saver()
+        p2phd_saver.restore(session,"/workspace/p2phd_tf/models/model-716999")
 
         images = noise = gen_cost = dis_cost = inv_cost = None
         dis_cost_lst, inv_cost_lst = [], []
@@ -401,7 +471,7 @@ if __name__ == '__main__':
         data_files = np.array(data_files) 
         iteration=0
         npzs = {}
-        batchmx = np.zeros([args.batch_size,args.input_c,args.input_w,args.input_h])
+        batchmx = np.zeros([args.batch_size,args.ih,args.iw,args.ic])
         print("pre epoch")
         """
         with tf.name_scope("summary"):
@@ -428,11 +498,12 @@ if __name__ == '__main__':
                         gamma = args.gamma
 
                     for i in range(args.dis_iter):
+                        noise = np.random.randn(args.batch_size, args.z_dim)
                         batch_files,_ = minibatch.__next__()
                         for idx, filepath in enumerate(batch_files):
                             if not filepath in npzs:
                                 #npzs[filepath] = (np.load(filepath)['arr_0']/NORMALIZE_CONST-0.5)*2.
-                                npzs[filepath] = cv2.resize(scd.imread_as_jpg(filepath),(496,150))
+                                npzs[filepath] = cv2.resize(scd.imread_as_jpg(filepath),(args.iw,args.ih))
                             batchmx[idx,:,:,:]=npzs[filepath]
                         images = batchmx
 
@@ -440,12 +511,12 @@ if __name__ == '__main__':
                     if summary:
                         gen_cost, mg = mnistWganInv.train_gen(session, images, noise, summary=True)
                     else:
-                        gen_cost, go, gf, vf = mnistWganInv.train_gen(session, images, summary=False)
+                        gen_cost, go, gf, vf = mnistWganInv.train_gen(session, images, noise, summary=False)
 
                     if summary:
                         cd, md = mnistWganInv.train_dis(session, images, noise, gamma, summary=True)
                     else:
-                        cd = mnistWganInv.train_dis(session, images, gamma, summary=False)
+                        cd = mnistWganInv.train_dis(session, images, noise, gamma, summary=False)
                     dis_cost = cd
 
                     stime=time.time()-pretime        
@@ -470,10 +541,12 @@ if __name__ == '__main__':
                     if iteration % 1000 == 999:
                         dev_dis_cost_lst, dev_inv_cost_lst = [], []
                         dev_images = np.expand_dims(fixed_images[0],0)
+                        noise = np.random.randn(1, args.z_dim)
                         dev_dis_cost = session.run(
                             mnistWganInv.dis_cost,
                             feed_dict={mnistWganInv.images: dev_images,
-                                       mnistWganInv.gamma_plh:gamma})
+                                       mnistWganInv.gamma_plh:gamma,
+                                       mnistWganInv.z_noise:noise})
                         dev_dis_cost_lst += [dev_dis_cost]
                         dev_inv_cost_lst += [0]
                         tflib.plot.plot('dev dis cost', np.mean(dev_dis_cost_lst))

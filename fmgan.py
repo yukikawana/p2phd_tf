@@ -38,8 +38,9 @@ def get_saver():
     train_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.contrib.framework.get_name_scope())
     ssd_var_list=[v for v in train_vars if v.name.split("/")[0].startswith("wgan")]
     saver = tf.train.Saver(var_list=ssd_var_list)
+    return saver
 
-class hmgan(object):
+class fmgan(object):
     def __init__(self, x_dim=784, w=31, h=10, c=512, z_dim=64, latent_dim=64,nf=64,  batch_size=80,
                  c_gp_x=10., lamda=0.1, output_path='./',training=True,args=None):
         with tf.variable_scope('wgan'):
@@ -67,11 +68,14 @@ class hmgan(object):
 
          
             self.gamma_plh = tf.placeholder(tf.float32, shape=(), name='gammaplh')
-
             self.z = tf.placeholder(tf.float32, shape=[self.batch_size, self.z_dim])
+            self.x = tf.placeholder(tf.float32, shape=[self.batch_size, self.h,self.w,self.c])
+
+    def build_model(self):
+        #with tf.variable_scope('wgan'):
+        if True:
             self.x_p = self.generate(self.z)
 
-            self.x = tf.placeholder(tf.float32, shape=[self.batch_size, self.h,self.w,self.c])
             #self.x += tf.random_normal(shape=tf.shape(self.x), mean=0.0, stddev=0.01)
             self.z_p = self.invert(self.x)
 
@@ -108,6 +112,7 @@ class hmgan(object):
             self.inv_params=[v for v in train_vars if v.name.split("/")[1] == "invert"]
             self.dis_params=[v for v in train_vars if v.name.split("/")[1] == "discriminate"]
 
+        with tf.variable_scope('wgan'):
             genopt = tf.train.AdamOptimizer(
                 learning_rate=1e-4, beta1=0.5, beta2=0.9)
             self.gen_train_op= slim.learning.create_train_op(self.gen_cost,genopt,summarize_gradients=True,variables_to_train=self.gen_params)
@@ -193,7 +198,7 @@ class hmgan(object):
                 return net + X
 
     def generate(self, z, reuse=False):
-        with tf.variable_scope('generate', reuse=reuse):
+        with tf.variable_scope('wgan/generate', reuse=reuse):
             start_coef = 2**(self.restime-1)
             nf = self.nf
             if TRANSPOSE:
@@ -225,7 +230,7 @@ class hmgan(object):
             return net
 
     def discriminate(self, X, reuse=False):
-        with tf.variable_scope('discriminate', reuse=reuse):
+        with tf.variable_scope('wgan/discriminate', reuse=reuse):
             nf = self.nf
             net = slim.conv2d(X, nf, [3,3], activation_fn=None) 
             for i,p in enumerate(range(1,self.restime)):
@@ -358,13 +363,13 @@ if __name__ == '__main__':
                         help='dataset path')
     parser.add_argument('--nf', type=int, default=128,
                         help='ooooooooooo')
-    parser.add_argument('--input_c', type=int, default=10,
+    parser.add_argument('--input_c', type=int, default=512,
     #parser.add_argument('--input_c', type=int, default=512,
                         help='ooooooooooo')
     parser.add_argument('--input_w', type=int, default=31,
     #parser.add_argument('--input_w', type=int, default=31,
                         help='ooooooooooo')
-    parser.add_argument('--input_h', type=int, default=512,
+    parser.add_argument('--input_h', type=int, default=10,
     #parser.add_argument('--input_h', type=int, default=10,
                         help='ooooooooooo')
     parser.add_argument("--gamma",type=float,default=0.1,help="noise variance for regularizer [0.1]")
@@ -395,7 +400,7 @@ if __name__ == '__main__':
         output_path=args.output_path,args=args)
     else:
         mnistWganInv = hmgan(
-        x_dim=784, z_dim=args.z_dim, w=args.input_w, h=args.input_c, c=args.input_h, latent_dim=args.latent_dim,
+        x_dim=784, z_dim=args.z_dim, w=args.input_w, h=args.input_h, c=args.input_c, latent_dim=args.latent_dim,
         nf=256, batch_size=args.batch_size, c_gp_x=args.c_gp_x, lamda=args.lamda,
         output_path=args.output_path,args=args)
 

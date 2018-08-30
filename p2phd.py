@@ -2,6 +2,7 @@ import os, sys, time
 import tensorlayer as tl
 from glob import glob
 import time
+import math
 sys.path.append(os.getcwd())
 
 import matplotlib
@@ -60,7 +61,12 @@ NORMALIZE_CONST=201.
 TRANSPOSE=False
 act_fn_switch=tf.nn.leaky_relu
 initializer = tf.random_normal_initializer(stddev=0.02)
-initializer2 = tf.random_normal_initializer(mean=0.,stddev=0.02)
+def biases_initializer(in_ch,ks):
+    n = in_ch
+    for k in ks:
+        n *= k
+    std = 1. / math.sqrt(n)
+    return tf.random_uniform_initializer(minval=-std,maxval=std)
 
 class pxhdgan(object):
     def __init__(self, x_dim=784, w=31, h=10, c=512, z_dim=64, latent_dim=64,nf=64,  batch_size=80,
@@ -89,11 +95,14 @@ class pxhdgan(object):
 
      
         self.gamma_plh = tf.placeholder(tf.float32, shape=(), name='gammaplh')
-        self.images = tf.placeholder(tf.float32, shape=[None, 150, 496,self.c])
+        self.images = tf.placeholder(tf.float32, shape=[None, self.h, self.w,self.c])
+
+    def build_model(self):
 
         self.scdobj_real = scd.SCD(input=self.images)
         self.label= self.scdobj_real.end_points["pool5"]
-        self.label_resized = tf.image.resize_bilinear(self.label, (150,496))
+        #self.label_resized = tf.image.resize_bilinear(self.label, (150,496))
+        self.label_resized = tf.image.resize_nearest_neighbor(self.label, (self.h,self.w))
         self.images_fake = self.global_generate(self.label_resized)
         self.images_fake_float = tf.clip_by_value((self.images_fake+1.)/2.*255.,0,255)
         self.scdobj_fake = scd.SCD(input=self.images_fake_float, reuse=True)
@@ -127,6 +136,7 @@ class pxhdgan(object):
                     l1loss(self.pred_fake[i][j], self.pred_real[i][j]) * self.lambda_feat
 
         self.vgg_feat_cost = 0
+        #self.vgg_feat_cost = tf.constant(0.)
         #weights=[1./1.6, 1./2.3, 1./1.8, 1./2.8, 10/0.8]
         weights = [1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0]        
         for i in range(5):
@@ -189,11 +199,11 @@ class pxhdgan(object):
         with tf.variable_scope(name):
 
                 net = pad(X, 1)
-                net = slim.conv2d(net,dim ,activation_fn=None,  weights_initializer=initializer, kernel_size=(3,3), padding="VALID") 
+                net = slim.conv2d(net, dim, biases_initializer=biases_initializer(dim,(3,3)), activation_fn=None,  weights_initializer=initializer, kernel_size=(3,3), padding="VALID") 
                 net = norm_layer(net, trainable=True)
                 net = activation(net)
                 net = pad(X, 1)
-                net = slim.conv2d(net, dim, activation_fn=None,  weights_initializer=initializer, kernel_size=(3,3), padding="VALID") 
+                net = slim.conv2d(net, dim, biases_initializer=biases_initializer(dim,(3,3)), activation_fn=None,  weights_initializer=initializer, kernel_size=(3,3), padding="VALID") 
                 net = norm_layer(net, trainable=True)
 
                 return net + X
@@ -203,7 +213,7 @@ class pxhdgan(object):
             n_downsampling=4
 
             net = pad(label, 3)
-            net = slim.conv2d(net,self.ngf, activation_fn=None,  weights_initializer=initializer,  kernel_size=(7,7), padding="VALID") 
+            net = slim.conv2d(net,self.ngf, biases_initializer=biases_initializer(self.ngf, (7,7)), activation_fn=None,  weights_initializer=initializer,  kernel_size=(7,7), padding="VALID") 
             print("1 reflect conv", net)
             net = norm_layer(net, trainable=True)
             net = activation(net)
@@ -211,7 +221,7 @@ class pxhdgan(object):
             for i in range(n_downsampling):
                 mult = 2**i
                 net = pad(net, 1, mode="CONSTANT")
-                net = slim.conv2d(net,self.ngf*mult*2, activation_fn=None,  weights_initializer=initializer, kernel_size=(3,3), stride=(2,2), padding="VALID") 
+                net = slim.conv2d(net,self.ngf*mult*2, biases_initializer=biases_initializer(self.ngf*mult*2, (3,3)), activation_fn=None,  weights_initializer=initializer, kernel_size=(3,3), stride=(2,2), padding="VALID") 
                 print("%d conv roop"%i, net)
                 net = norm_layer(net, trainable=True)
                 net = activation(net)
@@ -221,20 +231,26 @@ class pxhdgan(object):
                 net = self._residual_block(net, self.ngf*mult, name="p2phd_resblock%d"%i)
                 print("%d resnet roop"%i, net)
             
+            assert(self.w==496 and self.h==150)
+            resize_size=[(19,62),
+                         (38,124),
+                         (75,248),
+                         (150,496)]
             for i in range(n_downsampling):
                 mult = 2**(n_downsampling - i)
-                #net = pad(net, 1, mode="CONSTANT")
-                net = slim.conv2d_transpose(net,self.ngf*mult//2, activation_fn=None,  weights_initializer=initializer,  kernel_size=(3,3), stride=(2,2), padding="SAME")
-                #print("%d transconv roop"%i, net)
+                """
+                net = slim.conv2d_transpose(net,self.ngf*mult//2, biases_initializer=biases_initializer(self.ngf*mult//2, (3,3)), activation_fn=None,  weights_initializer=initializer,  kernel_size=(3,3), stride=(2,2), padding="SAME")
                 if i == 0 or i == 2:
                     net = net[:,1:,:,:]
-                #net = pad(net, (0,0) if i == 1 or i == 3 else (0,0), mode="CONSTANT")
+                """
+                net = tf.image.resize_nearest_neighbor(net, resize_size[i])
+                net=slim.conv2d(net,self.ngf*mult//2, biases_initializer=biases_initializer(self.ngf*mult//2, (3,3)), weights_initializer=initializer, kernel_size=(3,3),activation_fn=None)
                 net = norm_layer(net, trainable=True)
                 print("%d transconv pad roop"%i, net)
                 net = activation(net)
 
             net = pad(net, 3)
-            net = slim.conv2d(net, 3,activation_fn=None,  weights_initializer=initializer,  kernel_size=(7,7), padding="VALID") 
+            net = slim.conv2d(net, 3,activation_fn=None,  biases_initializer=biases_initializer(3, (7,7)), weights_initializer=initializer,  kernel_size=(7,7), padding="VALID") 
             print("last reflect conv", net)
             net = tf.nn.tanh(net)
 
@@ -249,7 +265,7 @@ class pxhdgan(object):
                 res.append(self.nlayer_discriminate(X, name="nlayer_discriminate%d"%i, reuse=reuse))
                 #res.append(self.nlayer_discriminate(X, reuse=None))
                 if i!=(self.num_D-1):
-                    X = tf.nn.avg_pool(X,strides=[1,2,2,1], ksize=[1,2,2,1],padding="VALID")
+                    X = tf.nn.avg_pool(X,strides=[1,2,2,1], ksize=[1,3,3,1],padding="VALID")
                     X = pad(X, 1, mode="CONSTANT")
         return res
 
@@ -262,28 +278,28 @@ class pxhdgan(object):
             res=[]
             kw = 4
             padw = int(np.ceil((kw-1.0)/2))
-            #net = pad(X, padw, mode="CONSTANT")
-            net = slim.conv2d(net,self.ndf, activation_fn=None,  weights_initializer=initializer,  kernel_size=(kw,kw), stride=(2,2), padding="VALID")
+            net = pad(net, padw, mode="CONSTANT")
+            net = slim.conv2d(net,self.ndf, activation_fn=None, biases_initializer=biases_initializer(self.ndf, (kw,kw)), weights_initializer=initializer,  kernel_size=(kw,kw), stride=(2,2), padding="VALID")
             net=tf.nn.leaky_relu(net)
             res.append(net)
             nf = self.ndf
             for n in range(1, self.n_layers):
                 nf_prev = nf
                 nf = min(nf * 2, 512)
-                #net = pad(X, padw, mode="CONSTANT")
-                net=slim.conv2d(net,nf, activation_fn=None,  weights_initializer=initializer, kernel_size=(kw,kw), stride=(2,2), padding="VALID")
+                net = pad(net, padw, mode="CONSTANT")
+                net=slim.conv2d(net,nf, biases_initializer=biases_initializer(nf, (kw,kw)), activation_fn=None,  weights_initializer=initializer, kernel_size=(kw,kw), stride=(2,2), padding="VALID")
                 net = norm_layer(net, trainable=True)
                 net = tf.nn.leaky_relu(net)
                 res.append(net)
             nf_prev = nf
             nf = min(nf * 2, 512)
-            #net = pad(X, padw, mode="CONSTANT")
-            net=slim.conv2d(net,nf, activation_fn=None,  weights_initializer=initializer, kernel_size=(kw,kw), padding="VALID")
+            net = pad(net, padw, mode="CONSTANT")
+            net=slim.conv2d(net,nf, biases_initializer=biases_initializer(nf, (kw,kw)), activation_fn=None,  weights_initializer=initializer, kernel_size=(kw,kw), padding="VALID")
             net = norm_layer(net, trainable=True)
             net = tf.nn.leaky_relu(net)
             res.append(net)
-            #net = pad(X, padw, mode="CONSTANT")
-            net=slim.conv2d(net,1, activation_fn=None,  weights_initializer=initializer,  kernel_size=(kw,kw), padding="VALID")
+            net = pad(net, padw, mode="CONSTANT")
+            net=slim.conv2d(net,1, activation_fn=None,  biases_initializer=biases_initializer(1,(kw,kw)), weights_initializer=initializer,  kernel_size=(kw,kw), padding="VALID")
             res.append(net)
             return res
 
@@ -358,13 +374,13 @@ if __name__ == '__main__':
                         help='dataset path')
     parser.add_argument('--nf', type=int, default=128,
                         help='ooooooooooo')
-    parser.add_argument('--input_c', type=int, default=150,
+    parser.add_argument('--input_h', type=int, default=150,
     #parser.add_argument('--input_c', type=int, default=512,
                         help='ooooooooooo')
     parser.add_argument('--input_w', type=int, default=496,
     #parser.add_argument('--input_w', type=int, default=31,
                         help='ooooooooooo')
-    parser.add_argument('--input_h', type=int, default=3,
+    parser.add_argument('--input_c', type=int, default=3,
     #parser.add_argument('--input_h', type=int, default=10,
                         help='ooooooooooo')
     parser.add_argument("--gamma",type=float,default=0.1,help="noise variance for regularizer [0.1]")
@@ -376,19 +392,22 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
 
-    fixed_images = np.zeros([8,args.input_c,args.input_w,args.input_h])
+    fixed_images = np.zeros([8,args.input_h,args.input_w,args.input_c])
     for i in range(8):
-        fixed_images[i,:,:,:]=cv2.resize(scd.imread_as_jpg(os.path.join(args.dataset_test_path,"%06d.png"%(i+7481))),(496,150))
+        fixed_images[i,:,:,:]=cv2.resize(scd.imread_as_jpg(os.path.join(args.dataset_test_path,"%06d.png"%(i+7481))),(args.input_w,args.input_h))
     
     mnistWganInv = pxhdgan(
-        x_dim=784, z_dim=args.z_dim, w=args.input_w, h=args.input_c, c=args.input_h, latent_dim=args.latent_dim,
+        x_dim=784, z_dim=args.z_dim, w=args.input_w, h=args.input_h, c=args.input_c, latent_dim=args.latent_dim,
         nf=256, batch_size=args.batch_size, c_gp_x=args.c_gp_x, lamda=args.lamda,
         output_path=args.output_path,args=args)
 
     train_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=tf.contrib.framework.get_name_scope())
     p2phd_var_list=[v for v in train_vars if v.name.split("/")[0] == "pix2pixhd"]
     saver = tf.train.Saver(max_to_keep=10, var_list=p2phd_var_list)
+    for a in p2phd_var_list:
+        print(a)
 
+    assert(False)
 
     config = tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))
     with tf.Session(config=config) as session:
@@ -405,7 +424,7 @@ if __name__ == '__main__':
         data_files = np.array(data_files) 
         iteration=0
         npzs = {}
-        batchmx = np.zeros([args.batch_size,args.input_c,args.input_w,args.input_h])
+        batchmx = np.zeros([args.batch_size,args.input_h,args.input_w,args.input_w])
         print("pre epoch")
         """
         with tf.name_scope("summary"):
@@ -436,7 +455,7 @@ if __name__ == '__main__':
                         for idx, filepath in enumerate(batch_files):
                             if not filepath in npzs:
                                 #npzs[filepath] = (np.load(filepath)['arr_0']/NORMALIZE_CONST-0.5)*2.
-                                npzs[filepath] = cv2.resize(scd.imread_as_jpg(filepath),(496,150))
+                                npzs[filepath] = cv2.resize(scd.imread_as_jpg(filepath),(args.input_w,args.input_h))
                             batchmx[idx,:,:,:]=npzs[filepath]
                         images = batchmx
 
